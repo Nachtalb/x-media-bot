@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![http, cap])
         .default_handler(|_| async {})
+        // Teloxide queues updates per chat by default, so a slow download would
+        // block /help in the same chat. Handle every update concurrently.
+        .distribution_function(|_| None::<()>)
         .error_handler(LoggingErrorHandler::with_custom_text(
             "update handler error",
         ))
