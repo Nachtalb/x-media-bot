@@ -16,6 +16,10 @@ Talk to [@hitakortbot](https://t.me/hitakortbot), or run your own. Send the bot 
 (fixer domains like `fxtwitter.com` and `fixupx.com` work too). In groups it reacts to
 links and ignores everything else.
 
+- The bot replies with a status message right away ("Fetching post…",
+  "Downloading 1/3…", "Uploading…"). A single photo/video/GIF replaces that
+  message in place, with the caption on the media. Several items go out as
+  new messages and the status message is deleted.
 - Photos and videos go out as one album (in chunks of 10), with the post text,
   the author and the link as the caption.
 - X "GIFs" are silent mp4s. Each one is remuxed with

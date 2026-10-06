@@ -9,14 +9,11 @@ mod fx;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use teloxide::payloads::{
-    SendAnimationSetters, SendMediaGroupSetters, SendMessageSetters, SendPhotoSetters,
-    SendVideoSetters,
-};
+use teloxide::payloads::{SendAnimationSetters, SendMediaGroupSetters, SendMessageSetters};
 use teloxide::prelude::*;
 use teloxide::types::{
-    InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, MessageEntityKind,
-    ParseMode, ReplyParameters,
+    InputFile, InputMedia, InputMediaAnimation, InputMediaPhoto, InputMediaVideo,
+    LinkPreviewOptions, MessageEntityKind, ParseMode, ReplyParameters,
 };
 use teloxide::utils::command::BotCommands;
 use tokio::io::AsyncWriteExt;
@@ -206,11 +203,19 @@ async fn handle_message(
         return Ok(());
     }
     for id in ids {
-        if let Err(err) = send_post(&bot, &msg, &http, cap.0, id).await {
+        // Answer right away so the user sees it's working; the media replaces this.
+        let status = bot
+            .send_message(msg.chat.id, "⏳ Fetching post…")
+            .reply_parameters(ReplyParameters::new(msg.id))
+            .await?;
+        if let Err(err) = send_post(&bot, &msg, &status, &http, cap.0, id).await {
             tracing::error!(id, ?err, "failed to send post");
             let _ = bot
-                .send_message(msg.chat.id, format!("Couldn't fetch that post: {err:#}"))
-                .reply_parameters(ReplyParameters::new(msg.id))
+                .edit_message_text(
+                    msg.chat.id,
+                    status.id,
+                    format!("Couldn't fetch that post: {err:#}"),
+                )
                 .await;
         }
     }
@@ -220,13 +225,14 @@ async fn handle_message(
 async fn send_post(
     bot: &Bot,
     msg: &Message,
+    status: &Message,
     http: &reqwest::Client,
     cap: u64,
     id: u64,
 ) -> Result<()> {
     let dir = std::env::temp_dir().join(format!("x-media-{id}-{}", msg.id.0));
     tokio::fs::create_dir_all(&dir).await?;
-    let res = send_post_in(bot, msg, http, cap, id, &dir).await;
+    let res = send_post_in(bot, msg, status, http, cap, id, &dir).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     res
 }
@@ -237,29 +243,65 @@ enum Ready {
     Gif(PathBuf, fx::Item),
 }
 
+impl Ready {
+    fn input_media(&self, caption: Option<String>) -> InputMedia {
+        match self {
+            Ready::Photo(p) => {
+                let mut m = InputMediaPhoto::new(InputFile::file(p));
+                m.caption = caption;
+                InputMedia::Photo(m)
+            }
+            Ready::Video(p, item) => {
+                let mut m = InputMediaVideo::new(InputFile::file(p).file_name("video.mp4"));
+                m.caption = caption;
+                m.width = Some(item.width);
+                m.height = Some(item.height);
+                m.duration = Some(item.secs());
+                m.supports_streaming = Some(true);
+                InputMedia::Video(m)
+            }
+            Ready::Gif(p, item) => {
+                let mut m = InputMediaAnimation::new(InputFile::file(p).file_name("animation.mp4"));
+                m.caption = caption;
+                m.width = Some(item.width);
+                m.height = Some(item.height);
+                InputMedia::Animation(m)
+            }
+        }
+    }
+}
+
 async fn send_post_in(
     bot: &Bot,
     msg: &Message,
+    status: &Message,
     http: &reqwest::Client,
     cap: u64,
     id: u64,
     dir: &Path,
 ) -> Result<()> {
+    let chat = msg.chat.id;
     let Some(tweet) = fx::fetch(http, id).await? else {
         anyhow::bail!("post not found (deleted or private?)");
     };
     let items = tweet.media();
     if items.is_empty() {
         if msg.chat.is_private() {
-            bot.send_message(msg.chat.id, "That post has no photos, videos or GIFs.")
-                .reply_parameters(ReplyParameters::new(msg.id))
+            bot.edit_message_text(chat, status.id, "That post has no photos, videos or GIFs.")
                 .await?;
+        } else {
+            bot.delete_message(chat, status.id).await?;
         }
         return Ok(());
     }
 
+    let n = items.len();
     let mut ready = Vec::new();
     for (i, item) in items.into_iter().enumerate() {
+        // Progress is cosmetic: a failed edit must not fail the post.
+        let _ = bot
+            .edit_message_text(chat, status.id, format!("⬇️ Downloading {}/{n}…", i + 1))
+            .await;
         let path = dir.join(format!("{i}.bin"));
         match item.kind.as_str() {
             "photo" => {
@@ -278,12 +320,22 @@ async fn send_post_in(
             }
         }
     }
+    let _ = bot
+        .edit_message_text(chat, status.id, "⬆️ Uploading…")
+        .await;
 
     let caption = caption(&tweet);
-    let reply = ReplyParameters::new(msg.id);
-    let chat = msg.chat.id;
 
+    // One item: the status message turns into the media.
+    if let [only] = ready.as_slice() {
+        bot.edit_message_media(chat, status.id, only.input_media(Some(caption)))
+            .await?;
+        return Ok(());
+    }
+
+    // Several: albums can't be made by editing, so send them and drop the status.
     // GIFs can't go into albums: send each as its own animation.
+    let reply = ReplyParameters::new(msg.id);
     let (gifs, album): (Vec<_>, Vec<_>) =
         ready.into_iter().partition(|r| matches!(r, Ready::Gif(..)));
     let mut caption = Some(caption);
@@ -301,59 +353,16 @@ async fn send_post_in(
         }
         req.await?;
     }
-
-    if let [only] = album.as_slice() {
-        let c = caption.take().unwrap_or_default();
-        match only {
-            Ready::Photo(p) => {
-                bot.send_photo(chat, InputFile::file(p))
-                    .caption(c)
-                    .reply_parameters(reply)
-                    .await?;
-            }
-            Ready::Video(p, item) => {
-                bot.send_video(chat, InputFile::file(p).file_name("video.mp4"))
-                    .caption(c)
-                    .width(item.width.into())
-                    .height(item.height.into())
-                    .duration(item.secs().into())
-                    .supports_streaming(true)
-                    .reply_parameters(reply)
-                    .await?;
-            }
-            Ready::Gif(..) => unreachable!(),
-        }
-        return Ok(());
-    }
-
     for chunk in album.chunks(10) {
         let media = chunk
             .iter()
-            .map(|r| {
-                let c = caption.take();
-                match r {
-                    Ready::Photo(p) => {
-                        let mut m = InputMediaPhoto::new(InputFile::file(p));
-                        m.caption = c;
-                        InputMedia::Photo(m)
-                    }
-                    Ready::Video(p, item) => {
-                        let mut m = InputMediaVideo::new(InputFile::file(p).file_name("video.mp4"));
-                        m.caption = c;
-                        m.width = Some(item.width);
-                        m.height = Some(item.height);
-                        m.duration = Some(item.secs());
-                        m.supports_streaming = Some(true);
-                        InputMedia::Video(m)
-                    }
-                    Ready::Gif(..) => unreachable!(),
-                }
-            })
+            .map(|r| r.input_media(caption.take()))
             .collect::<Vec<_>>();
         bot.send_media_group(chat, media)
             .reply_parameters(reply.clone())
             .await?;
     }
+    bot.delete_message(chat, status.id).await?;
     Ok(())
 }
 
