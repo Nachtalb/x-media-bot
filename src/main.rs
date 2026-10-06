@@ -90,6 +90,10 @@ async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
         .short_description("Sends the photos, videos and GIFs of X/Twitter links.")
         .await?;
     bot.set_my_description().description(ABOUT).await?;
+    // setMyName is heavily rate-limited; a failure must not block startup.
+    if let Err(err) = bot.set_my_name().name("X Media").await {
+        tracing::warn!(?err, "set_my_name failed");
+    }
     Ok(())
 }
 
