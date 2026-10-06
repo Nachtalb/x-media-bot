@@ -23,8 +23,9 @@ links and ignores everything else.
   at the front, no re-encode) and sent as a Telegram animation. Animations can't go
   in albums, so each one is sent on its own.
 - If a post has no media of its own, the quoted post's media is used.
-- Videos use the highest bitrate mp4 that fits under the Bot API's 50 MB upload
-  limit.
+- Videos use the highest bitrate mp4 that fits under the upload limit: 50 MB on
+  the public Bot API, 2 GB on a [self-hosted Bot API server](https://github.com/tdlib/telegram-bot-api)
+  in `--local` mode.
 
 Commands: `/start`, `/help`.
 
@@ -33,6 +34,7 @@ Commands: `/start`, `/help`.
 | Env var | Required | Notes |
 |---|---|---|
 | `TELOXIDE_TOKEN` | yes | BotFather token. |
+| `TELOXIDE_API_URL` | no | Self-hosted Bot API server, e.g. `http://telegram-bot-api:8081`. Raises the upload limit to 2 GB. |
 | `RUST_LOG` | no | Defaults to `info`. |
 
 ## Build & run

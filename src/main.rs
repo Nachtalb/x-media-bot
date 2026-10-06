@@ -21,8 +21,10 @@ use teloxide::types::{
 use teloxide::utils::command::BotCommands;
 use tokio::io::AsyncWriteExt;
 
-/// Public Bot API upload cap is 50 MB.
-const UPLOAD_CAP: u64 = 50 * 1000 * 1000;
+/// Upload cap of the public Bot API.
+const PUBLIC_UPLOAD_CAP: u64 = 50 * 1000 * 1000;
+/// Upload cap of a self-hosted Bot API server (`TELOXIDE_API_URL`).
+const LOCAL_UPLOAD_CAP: u64 = 2000 * 1000 * 1000;
 /// sendPhoto rejects photos over 10 MB.
 const PHOTO_CAP: u64 = 10 * 1000 * 1000;
 const CAPTION_MAX: usize = 1024;
@@ -30,6 +32,9 @@ const SOURCE: &str = "https://github.com/Nachtalb/x-media-bot";
 const AVATAR: &[u8] = include_bytes!("../assets/avatar.jpg");
 const ABOUT: &str = "Send me an X/Twitter link and I'll send you its photos, videos and GIFs. \
                      Works in groups too.";
+
+#[derive(Clone, Copy)]
+struct UploadCap(u64);
 
 #[derive(BotCommands, Clone, Debug, PartialEq, Eq)]
 #[command(
@@ -53,11 +58,24 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let token = std::env::var("TELOXIDE_TOKEN").context("TELOXIDE_TOKEN must be set")?;
-    let bot = Bot::new(token);
+    anyhow::ensure!(
+        std::env::var_os("TELOXIDE_TOKEN").is_some(),
+        "TELOXIDE_TOKEN must be set"
+    );
+    // Large uploads outlast teloxide's default 17 s request timeout.
+    let client = teloxide::net::default_reqwest_settings()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()?;
+    let bot = Bot::from_env_with_client(client);
+    let cap = UploadCap(if std::env::var_os("TELOXIDE_API_URL").is_some() {
+        LOCAL_UPLOAD_CAP
+    } else {
+        PUBLIC_UPLOAD_CAP
+    });
+    tracing::info!(api = %bot.api_url(), cap_mb = cap.0 / 1_000_000, "bot api");
     let http = reqwest::Client::builder()
         .user_agent(concat!("x-media-bot/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(std::time::Duration::from_secs(600))
         .build()?;
 
     if let Err(err) = publish_bot_metadata(&bot).await {
@@ -77,7 +95,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("starting long-polling dispatcher");
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![http])
+        .dependencies(dptree::deps![http, cap])
         .default_handler(|_| async {})
         .error_handler(LoggingErrorHandler::with_custom_text(
             "update handler error",
@@ -163,7 +181,12 @@ fn linked_ids(msg: &Message) -> Vec<u64> {
     ids
 }
 
-async fn handle_message(bot: Bot, msg: Message, http: reqwest::Client) -> Result<()> {
+async fn handle_message(
+    bot: Bot,
+    msg: Message,
+    http: reqwest::Client,
+    cap: UploadCap,
+) -> Result<()> {
     let ids = linked_ids(&msg);
     if ids.is_empty() {
         if msg.chat.is_private() {
@@ -174,7 +197,7 @@ async fn handle_message(bot: Bot, msg: Message, http: reqwest::Client) -> Result
         return Ok(());
     }
     for id in ids {
-        if let Err(err) = send_post(&bot, &msg, &http, id).await {
+        if let Err(err) = send_post(&bot, &msg, &http, cap.0, id).await {
             tracing::error!(id, ?err, "failed to send post");
             let _ = bot
                 .send_message(msg.chat.id, format!("Couldn't fetch that post: {err:#}"))
@@ -185,10 +208,16 @@ async fn handle_message(bot: Bot, msg: Message, http: reqwest::Client) -> Result
     Ok(())
 }
 
-async fn send_post(bot: &Bot, msg: &Message, http: &reqwest::Client, id: u64) -> Result<()> {
+async fn send_post(
+    bot: &Bot,
+    msg: &Message,
+    http: &reqwest::Client,
+    cap: u64,
+    id: u64,
+) -> Result<()> {
     let dir = std::env::temp_dir().join(format!("x-media-{id}-{}", msg.id.0));
     tokio::fs::create_dir_all(&dir).await?;
-    let res = send_post_in(bot, msg, http, id, &dir).await;
+    let res = send_post_in(bot, msg, http, cap, id, &dir).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;
     res
 }
@@ -203,6 +232,7 @@ async fn send_post_in(
     bot: &Bot,
     msg: &Message,
     http: &reqwest::Client,
+    cap: u64,
     id: u64,
     dir: &Path,
 ) -> Result<()> {
@@ -228,13 +258,13 @@ async fn send_post_in(
                 ready.push(Ready::Photo(path));
             }
             "gif" => {
-                download(http, &item.mp4_urls(), UPLOAD_CAP, &path).await?;
+                download(http, &item.mp4_urls(), cap, &path).await?;
                 let out = dir.join(format!("{i}.mp4"));
                 remux_gif(&path, &out).await?;
                 ready.push(Ready::Gif(out, item));
             }
             _ => {
-                download(http, &item.mp4_urls(), UPLOAD_CAP, &path).await?;
+                download(http, &item.mp4_urls(), cap, &path).await?;
                 ready.push(Ready::Video(path, item));
             }
         }
