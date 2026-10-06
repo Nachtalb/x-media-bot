@@ -30,6 +30,8 @@ const PHOTO_CAP: u64 = 10 * 1000 * 1000;
 const CAPTION_MAX: usize = 1024;
 const SOURCE: &str = "https://github.com/Nachtalb/x-media-bot";
 const AVATAR: &[u8] = include_bytes!("../assets/avatar.jpg");
+const NAME: &str = "X Media";
+const SHORT_ABOUT: &str = "Sends the photos, videos and GIFs of X/Twitter links.";
 const ABOUT: &str = "Send me an X/Twitter link and I'll send you its photos, videos and GIFs. \
                      Works in groups too.";
 
@@ -109,14 +111,21 @@ async fn main() -> Result<()> {
 
 async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
     use teloxide::payloads::{SetMyDescriptionSetters, SetMyShortDescriptionSetters};
-    bot.set_my_commands(Command::bot_commands()).await?;
-    bot.set_my_short_description()
-        .short_description("Sends the photos, videos and GIFs of X/Twitter links.")
-        .await?;
-    bot.set_my_description().description(ABOUT).await?;
-    // setMyName is heavily rate-limited; a failure must not block startup.
-    if let Err(err) = bot.set_my_name().name("X Media").await {
-        tracing::warn!(?err, "set_my_name failed");
+    // The setters are rate-limited (setMyName heavily): only call them on a mismatch.
+    let commands = Command::bot_commands();
+    if bot.get_my_commands().await? != commands {
+        bot.set_my_commands(commands).await?;
+    }
+    if bot.get_my_short_description().await?.short_description != SHORT_ABOUT {
+        bot.set_my_short_description()
+            .short_description(SHORT_ABOUT)
+            .await?;
+    }
+    if bot.get_my_description().await?.description != ABOUT {
+        bot.set_my_description().description(ABOUT).await?;
+    }
+    if bot.get_me().await?.first_name != NAME {
+        bot.set_my_name().name(NAME).await?;
     }
     Ok(())
 }
