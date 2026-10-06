@@ -105,9 +105,13 @@ async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
 
 /// setMyProfilePhoto isn't in teloxide-core 0.13 yet, so it's a raw multipart call.
 async fn set_profile_photo(bot: &Bot, http: &reqwest::Client) -> Result<()> {
-    let url = bot
-        .api_url()
-        .join(&format!("bot{}/setMyProfilePhoto", bot.token()))?;
+    // Not Url::join: the token's "123:" would parse as a URL scheme.
+    let base = bot.api_url();
+    let url = format!(
+        "{}/bot{}/setMyProfilePhoto",
+        base.as_str().trim_end_matches('/'),
+        bot.token()
+    );
     let form = reqwest::multipart::Form::new()
         .text("photo", r#"{"type":"static","photo":"attach://avatar"}"#)
         .part(
