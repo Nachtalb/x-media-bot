@@ -240,22 +240,24 @@ async fn send_post(
     res
 }
 
+/// Photos and videos are streamed from X straight into the upload; GIFs need
+/// ffmpeg, so they go through a temp file.
 enum Ready {
-    Photo(PathBuf),
-    Video(PathBuf, fx::Item),
+    Photo(InputFile),
+    Video(InputFile, fx::Item),
     Gif(PathBuf, fx::Item),
 }
 
 impl Ready {
     fn input_media(&self, caption: Option<String>) -> InputMedia {
         match self {
-            Ready::Photo(p) => {
-                let mut m = InputMediaPhoto::new(InputFile::file(p));
+            Ready::Photo(f) => {
+                let mut m = InputMediaPhoto::new(f.clone());
                 m.caption = caption;
                 InputMedia::Photo(m)
             }
-            Ready::Video(p, item) => {
-                let mut m = InputMediaVideo::new(InputFile::file(p).file_name("video.mp4"));
+            Ready::Video(f, item) => {
+                let mut m = InputMediaVideo::new(f.clone().file_name("video.mp4"));
                 m.caption = caption;
                 m.width = Some(item.width);
                 m.height = Some(item.height);
@@ -305,21 +307,21 @@ async fn send_post_in(
         let _ = bot
             .edit_message_text(chat, status.id, format!("⬇️ Downloading {}/{n}…", i + 1))
             .await;
-        let path = dir.join(format!("{i}.bin"));
         match item.kind.as_str() {
             "photo" => {
-                download(http, std::slice::from_ref(&item.url), PHOTO_CAP, &path).await?;
-                ready.push(Ready::Photo(path));
+                let f = stream(http, std::slice::from_ref(&item.url), PHOTO_CAP).await?;
+                ready.push(Ready::Photo(f));
             }
             "gif" => {
+                let path = dir.join(format!("{i}.bin"));
                 download(http, &item.mp4_urls(), cap, &path).await?;
                 let out = dir.join(format!("{i}.mp4"));
                 remux_gif(&path, &out).await?;
                 ready.push(Ready::Gif(out, item));
             }
             _ => {
-                download(http, &item.mp4_urls(), cap, &path).await?;
-                ready.push(Ready::Video(path, item));
+                let f = stream(http, &item.mp4_urls(), cap).await?;
+                ready.push(Ready::Video(f, item));
             }
         }
     }
@@ -383,6 +385,25 @@ fn caption(t: &fx::Tweet) -> String {
         text.to_string()
     };
     format!("{text}{footer}").trim().to_string()
+}
+
+/// Open the first url whose Content-Length fits under `cap` and hand its body to
+/// the upload as a stream. The headers arrive before the body, so a too-big
+/// file is skipped by dropping the connection; no HEAD request needed.
+async fn stream(http: &reqwest::Client, urls: &[String], cap: u64) -> Result<InputFile> {
+    use futures_util::TryStreamExt;
+    for url in urls {
+        let resp = http.get(url).send().await?.error_for_status()?;
+        if resp.content_length().is_some_and(|n| n > cap) {
+            continue;
+        }
+        let body = resp.bytes_stream().map_err(std::io::Error::other);
+        return Ok(InputFile::read(tokio_util::io::StreamReader::new(body)));
+    }
+    anyhow::bail!(
+        "media is larger than Telegram's {} MB limit",
+        cap / 1_000_000
+    )
 }
 
 /// Download the first url that fits under `cap` bytes; bigger ones are skipped.
