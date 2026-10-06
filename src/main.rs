@@ -16,7 +16,7 @@ use teloxide::payloads::{
 use teloxide::prelude::*;
 use teloxide::types::{
     InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, MessageEntityKind,
-    ReplyParameters,
+    ParseMode, ReplyParameters,
 };
 use teloxide::utils::command::BotCommands;
 use tokio::io::AsyncWriteExt;
@@ -127,10 +127,11 @@ async fn set_profile_photo(bot: &Bot, http: &reqwest::Client) -> Result<()> {
 
 async fn handle_command(bot: Bot, msg: Message, cmd: Command) -> Result<()> {
     let text = match cmd {
-        Command::Start => format!("{ABOUT}\n\nSource: {SOURCE}"),
+        Command::Start => format!("{ABOUT}\n\nSource: <a href=\"{SOURCE}\">GitHub</a>"),
         Command::Help => Command::descriptions().to_string(),
     };
     bot.send_message(msg.chat.id, text)
+        .parse_mode(ParseMode::Html)
         .link_preview_options(LinkPreviewOptions {
             is_disabled: true,
             url: None,
