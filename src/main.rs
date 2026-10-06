@@ -15,7 +15,8 @@ use teloxide::payloads::{
 };
 use teloxide::prelude::*;
 use teloxide::types::{
-    InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, MessageEntityKind, ReplyParameters,
+    InputFile, InputMedia, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions, MessageEntityKind,
+    ReplyParameters,
 };
 use teloxide::utils::command::BotCommands;
 use tokio::io::AsyncWriteExt;
@@ -25,6 +26,8 @@ const UPLOAD_CAP: u64 = 50 * 1000 * 1000;
 /// sendPhoto rejects photos over 10 MB.
 const PHOTO_CAP: u64 = 10 * 1000 * 1000;
 const CAPTION_MAX: usize = 1024;
+const SOURCE: &str = "https://github.com/Nachtalb/x-media-bot";
+const AVATAR: &[u8] = include_bytes!("../assets/avatar.jpg");
 const ABOUT: &str = "Send me an X/Twitter link and I'll send you its photos, videos and GIFs. \
                      Works in groups too.";
 
@@ -59,6 +62,9 @@ async fn main() -> Result<()> {
 
     if let Err(err) = publish_bot_metadata(&bot).await {
         tracing::warn!(?err, "failed to publish bot metadata");
+    }
+    if let Err(err) = set_profile_photo(&bot, &http).await {
+        tracing::warn!(?err, "failed to set profile photo");
     }
 
     let handler = Update::filter_message()
@@ -97,12 +103,37 @@ async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
     Ok(())
 }
 
+/// setMyProfilePhoto isn't in teloxide-core 0.13 yet, so it's a raw multipart call.
+async fn set_profile_photo(bot: &Bot, http: &reqwest::Client) -> Result<()> {
+    let url = bot
+        .api_url()
+        .join(&format!("bot{}/setMyProfilePhoto", bot.token()))?;
+    let form = reqwest::multipart::Form::new()
+        .text("photo", r#"{"type":"static","photo":"attach://avatar"}"#)
+        .part(
+            "avatar",
+            reqwest::multipart::Part::bytes(AVATAR)
+                .file_name("avatar.jpg")
+                .mime_str("image/jpeg")?,
+        );
+    let resp: serde_json::Value = http.post(url).multipart(form).send().await?.json().await?;
+    anyhow::ensure!(resp["ok"] == true, "setMyProfilePhoto: {resp}");
+    Ok(())
+}
+
 async fn handle_command(bot: Bot, msg: Message, cmd: Command) -> Result<()> {
     let text = match cmd {
-        Command::Start => ABOUT.to_string(),
+        Command::Start => format!("{ABOUT}\n\nSource: {SOURCE}"),
         Command::Help => Command::descriptions().to_string(),
     };
     bot.send_message(msg.chat.id, text)
+        .link_preview_options(LinkPreviewOptions {
+            is_disabled: true,
+            url: None,
+            prefer_small_media: false,
+            prefer_large_media: false,
+            show_above_text: false,
+        })
         .reply_parameters(ReplyParameters::new(msg.id))
         .await?;
     Ok(())

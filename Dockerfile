@@ -25,6 +25,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
     && rm -rf src target/x86_64-unknown-linux-musl/release/deps/x_media_bot*
 
+COPY assets ./assets
 COPY src ./src
 RUN cargo build --release --locked --target x86_64-unknown-linux-musl
 
