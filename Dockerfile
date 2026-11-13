@@ -27,7 +27,9 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 
 COPY assets ./assets
 COPY src ./src
-RUN cargo build --release --locked --target x86_64-unknown-linux-musl
+# COPY keeps git mtimes, older than the stub build: touch so cargo rebuilds.
+RUN touch src/main.rs \
+    && cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # ── runtime: distroless static (CA certs, /tmp, nonroot user, no shell). ──
 FROM gcr.io/distroless/static-debian13:nonroot
